@@ -1,0 +1,120 @@
+version: '3'
+services:
+  nginx:
+    restart: always
+    build:
+      dockerfile: Dockerfile.dev
+      context: ./nginx
+    ports:
+      - '8085:80'
+  mysql:
+    image: 'mysql:latest'
+    restart: always
+    environment:
+      - MYSQL_DATABASE=users_db
+      - MYSQL_ROOT_PASSWORD=password
+      - MYSQL_USER=user
+      - MYSQL_PASSWORD=password
+    ports:
+      - 3306:3306
+    command: --init-file /data/application/init.sql
+    volumes:
+      - ./bookstore_users_api/utils/mysql_utils/init.sql:/data/application/init.sql
+  cassandra:
+    image: 'cassandra:latest'
+    restart: always
+    ports:
+      - 9042:9042
+    healthcheck:
+      test: ["CMD", "cqlsh", "-u cassandra", "-p cassandra" ,"-e describe keyspaces"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+  cassandra-load-keyspace:
+    image: 'cassandra:latest'
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - ./bookstore_oauth_api/utils/cassandra_utils/keyspace.cql:/schema.cql
+    command: /bin/bash -c "echo loading cassandra keyspace && cqlsh cassandra -f /schema.cql"
+  elasticsearch:
+    image: 'docker.elastic.co/elasticsearch/elasticsearch:7.10.2'
+    container_name: elasticsearch
+    healthcheck:
+        test: ["CMD-SHELL", "curl --silent --fail localhost:9200/_cluster/health || exit 1"]
+        interval: 30s
+        timeout: 30s
+        retries: 3
+    restart: always
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    environment:
+      - xpack.security.enabled=false
+      - discovery.type=single-node
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - 9200:9200
+      - 9300:9300
+  kibana:
+    container_name: kibana
+    image: docker.elastic.co/kibana/kibana:7.10.2
+    restart: always
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+    ports:
+      - 5601:5601
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+  users:
+    build:
+      dockerfile: Dockerfile.dev
+      context: ./bookstore_users_api
+    restart: always
+    ports:
+      - '8082:8082'
+    environment:
+      - MYSQL_USERS_USERNAME=user
+      - MYSQL_USERS_PASSWORD=password
+      - MYSQL_USERS_HOST=mysql
+      - MYSQL_USERS_SCHEMA=users_db
+      - OAUTH_MICROSERVICE_URL=http://oauth:8080
+    volumes:
+      - ./bookstore_users_api:/go/src/github.com/a-soliman/bookstore_users_api
+  oauth:
+    build:
+      dockerfile: Dockerfile.dev
+      context: ./bookstore_oauth_api
+    restart: always
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    ports:
+      - '8080:8080'
+    volumes:
+      - ./bookstore_oauth_api:/go/src/github.com/a-soliman/bookstore_oauth_api
+    environment: 
+      - CASSANDRA_HOSTS=cassandra
+      - USERS_MICROSERVICE_URL=http://users:8082
+  items:
+    build:
+      dockerfile: Dockerfile.dev
+      context: ./bookstore_items_api
+    restart: always
+    ports:
+      - 8000:8000
+    volumes:
+      - ./bookstore_items_api:/go/src/github.com/a-soliman/bookstore_items_api
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - OAUTH_MICROSERVICE_URL=http://oauth:8080
